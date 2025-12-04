@@ -1,213 +1,250 @@
-import { GoogleGenAI, Type } from '@google/genai';
-import { Question, QuizResult } from '../types';
+import { GoogleGenerativeAI } from "@google/generative-ai";
+import { Question, QuizResult } from "../types";
+import { db } from "./firebaseConfig";
+import { collection, addDoc } from "firebase/firestore";
+import { getAuth } from "firebase/auth";
 
-// Ensure API Key is available
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
+const genAI = new GoogleGenerativeAI(apiKey);
 
-// Helper for unique ID generation
+// Create unique ID for each question
 const generateId = () => Math.random().toString(36).substr(2, 9);
 
+// Save helper
+const saveToFirestore = async (path: string, data: any) => {
+  try {
+    await addDoc(collection(db, path), data);
+  } catch (e) {
+    console.error("Firestore save failed:", e);
+  }
+};
+
+// Clean JSON returned by AI (sometimes Gemini wraps JSON in text)
+const extractJson = (text: string) => {
+  try {
+    const start = text.indexOf("[");
+    const end = text.lastIndexOf("]") + 1;
+    return JSON.parse(text.substring(start, end));
+  } catch {
+    throw new Error("AI returned invalid JSON.");
+  }
+};
+
 export const geminiService = {
-  /**
-   * Generates questions based on a text topic or prompt.
-   */
-  async generateQuestionsFromText(subject: string, topic: string, count: number = 5): Promise<Question[]> {
-    if (!process.env.API_KEY) throw new Error("API Key missing");
+  // ==========================================================
+  // TEXT → MCQ
+  // ==========================================================
+  async generateQuestionsFromText(subject: string, topic: string, count: number): Promise<Question[]> {
+    const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
-    const prompt = `Generate ${count} multiple-choice questions for the subject "${subject}" specifically about the topic "${topic}".
-    Ensure diversity in difficulty.
-    Strictly output JSON.`;
+    const prompt = `
+Generate exactly ${count} multiple-choice questions on:
+Subject: ${subject}
+Topic: ${topic}
 
-    try {
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: prompt,
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                question: { type: Type.STRING },
-                options: { type: Type.ARRAY, items: { type: Type.STRING } },
-                correctAnswer: { type: Type.STRING, description: "Must be exactly one of the options" },
-                topic: { type: Type.STRING },
-                subject: { type: Type.STRING }
-              }
-            }
-          }
-        }
+Return ONLY a JSON array in this format:
+
+[
+  {
+    "question": "text",
+    "options": ["A","B","C","D"],
+    "correctAnswer": "A",
+    "topic": "${topic}",
+    "subject": "${subject}"
+  }
+]
+`;
+
+    const result = await model.generateContent(prompt);
+    const text = result.response.text();
+
+    const json = extractJson(text);
+
+    // Save to user Firestore
+    const user = getAuth().currentUser;
+
+    if (user) {
+      await saveToFirestore(`users/${user.uid}/questions`, {
+        subject,
+        topic,
+        questions: json,
+        timestamp: Date.now(),
       });
-
-      const rawData = JSON.parse(response.text || '[]');
-      // Ensure we limit to count and fallback metadata
-      return rawData.slice(0, count).map((item: any) => ({
-        id: generateId(),
-        text: item.question,
-        options: item.options,
-        correctAnswer: item.correctAnswer,
-        topic: topic || item.topic, // Prefer user input
-        subject: subject || item.subject || 'General'
-      }));
-
-    } catch (error) {
-      console.error("Gemini Gen Error:", error);
-      throw new Error("Failed to generate questions. Please try again.");
     }
+
+    return json.map((q: any) => ({
+      id: generateId(),
+      text: q.question,
+      options: q.options,
+      correctAnswer: q.correctAnswer,
+      topic: q.topic,
+      subject: q.subject
+    }));
   },
 
-  /**
-   * Extract questions from image data (base64).
-   */
-  async generateQuestionsFromImages(base64Images: string[], subject: string, topic: string, count: number = 5): Promise<Question[]> {
-    if (!process.env.API_KEY) throw new Error("API Key missing");
+  // ==========================================================
+  // IMAGE → MCQ
+  // ==========================================================
+  async generateQuestionsFromImages(images: string[], subject: string, topic: string, count: number): Promise<Question[]> {
+    const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
-    const parts: any[] = base64Images.map(img => ({
+    const imgParts = images.map(img => ({
       inlineData: {
-        mimeType: 'image/jpeg', // Assuming jpeg for simplicity
-        data: img.split(',')[1] 
+        mimeType: "image/jpeg",
+        data: img.split(",")[1]
       }
     }));
 
-    parts.push({
-      text: `Analyze these images. They contain quiz material. Extract exactly ${count} multiple-choice questions related to Subject: "${subject}", Topic: "${topic}". 
-      If the images don't have enough direct questions, generate new ones based on the visual content.
-      Output structured JSON.` 
+    const promptPart = {
+      text: `
+Extract ${count} MCQs based ONLY on these images.
+
+Format (JSON ONLY):
+
+[
+  {
+    "question": "text",
+    "options": ["A","B","C","D"],
+    "correctAnswer": "A",
+    "topic": "${topic}",
+    "subject": "${subject}"
+  }
+]
+`
+    };
+
+    const result = await model.generateContent({
+      contents: [
+        {
+          role: "user",
+          parts: [...imgParts, promptPart]
+        }
+      ]
     });
 
-    try {
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: { parts },
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                question: { type: Type.STRING },
-                options: { type: Type.ARRAY, items: { type: Type.STRING } },
-                correctAnswer: { type: Type.STRING },
-                topic: { type: Type.STRING },
-                subject: { type: Type.STRING }
-              }
-            }
-          }
-        }
+    const text = result.response.text();
+    const json = extractJson(text);
+
+    const user = getAuth().currentUser;
+    if (user) {
+      await saveToFirestore(`users/${user.uid}/questions`, {
+        subject,
+        topic,
+        questions: json,
+        timestamp: Date.now(),
       });
-
-      const rawData = JSON.parse(response.text || '[]');
-      return rawData.slice(0, count).map((item: any) => ({
-        id: generateId(),
-        text: item.question,
-        options: item.options,
-        correctAnswer: item.correctAnswer,
-        topic: topic || item.topic || 'Imported',
-        subject: subject || item.subject || 'General'
-      }));
-
-    } catch (error) {
-      console.error("Gemini Vision Error:", error);
-      throw new Error("Failed to process images.");
     }
+
+    return json.map((q: any) => ({
+      id: generateId(),
+      text: q.question,
+      options: q.options,
+      correctAnswer: q.correctAnswer,
+      topic: q.topic,
+      subject: q.subject
+    }));
   },
 
-   /**
-   * Generates questions based on a file content string.
-   */
-   async generateQuestionsFromFile(content: string, subject: string, topic: string, count: number = 5): Promise<Question[]> {
-    if (!process.env.API_KEY) throw new Error("API Key missing");
-    
-    // Truncate content to avoid token limits if necessary, though Flash 2.5 has large context
-    const truncatedContent = content.substring(0, 30000); 
+  // ==========================================================
+  // FILE → MCQ
+  // ==========================================================
+  async generateQuestionsFromFile(content: string, subject: string, topic: string, count: number): Promise<Question[]> {
+    const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
-    const prompt = `Context: ${truncatedContent}
-    
-    Task: Generate ${count} multiple-choice questions based on the text above.
-    Subject: ${subject}
-    Topic: ${topic}
-    Strictly output JSON.`;
+    const prompt = `
+Using ONLY this content:
 
-    try {
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: prompt,
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                question: { type: Type.STRING },
-                options: { type: Type.ARRAY, items: { type: Type.STRING } },
-                correctAnswer: { type: Type.STRING },
-                topic: { type: Type.STRING },
-                subject: { type: Type.STRING }
-              }
-            }
-          }
-        }
+${content.slice(0, 20000)}
+
+Generate exactly ${count} MCQs in JSON format:
+
+[
+  {
+    "question": "text",
+    "options": ["A","B","C","D"],
+    "correctAnswer": "A",
+    "topic": "${topic}",
+    "subject": "${subject}"
+  }
+]
+`;
+
+    const result = await model.generateContent(prompt);
+    const text = result.response.text();
+    const json = extractJson(text);
+
+    const user = getAuth().currentUser;
+    if (user) {
+      await saveToFirestore(`users/${user.uid}/questions`, {
+        subject,
+        topic,
+        questions: json,
+        timestamp: Date.now(),
       });
-
-      const rawData = JSON.parse(response.text || '[]');
-      return rawData.slice(0, count).map((item: any) => ({
-        id: generateId(),
-        text: item.question,
-        options: item.options,
-        correctAnswer: item.correctAnswer,
-        topic: topic || item.topic,
-        subject: subject || item.subject
-      }));
-    } catch (error) {
-       console.error("Gemini File Gen Error:", error);
-       throw new Error("Failed to generate questions from file.");
     }
+
+    return json.map((q: any) => ({
+      id: generateId(),
+      text: q.question,
+      options: q.options,
+      correctAnswer: q.correctAnswer,
+      topic: q.topic,
+      subject: q.subject
+    }));
   },
 
-  /**
-   * Generates a study plan based on quiz history.
-   */
-  async generateStudyPlan(history: QuizResult[]): Promise<string> {
-    if (!process.env.API_KEY) throw new Error("API Key missing");
-
-    const recent = history.slice(-5);
-    const summary = recent.map(r => 
-      `Topic: ${r.topic}, Score: ${r.score}/${r.totalQuestions}, Date: ${new Date(r.timestamp).toLocaleDateString()}`
-    ).join('\n');
-
-    const prompt = `Based on the following recent quiz performance:\n${summary}\n\n
-    Provide a personalized, 3-bullet-point study plan. Be encouraging but specific about what topics to review. 
-    Keep it under 100 words.`;
-
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: prompt,
-    });
-
-    return response.text || "Keep practicing to generate a study plan!";
-  },
-
-  /**
-   * Explains why an answer is correct/incorrect.
-   */
+  // ==========================================================
+  // EXPLANATION
+  // ==========================================================
   async explainAnswer(question: string, selected: string, correct: string): Promise<string> {
-    if (!process.env.API_KEY) throw new Error("API Key missing");
+    const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
-    const prompt = `Question: "${question}"
-    User Selected: "${selected}"
-    Correct Answer: "${correct}"
-    
-    Explain why the correct answer is right and (if different) why the selected answer is wrong. 
-    Keep it to max 5 sentences. be concise and educational.`;
+    const prompt = `
+Question: ${question}
+User Selected: ${selected}
+Correct Answer: ${correct}
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: prompt,
+Explain in 4 short sentences.
+`;
+
+    const result = await model.generateContent(prompt);
+    const text = result.response.text();
+
+    await saveToFirestore("explanations", {
+      question, selected, correct,
+      explanation: text,
+      timestamp: Date.now()
     });
 
-    return response.text || "Explanation currently unavailable.";
+    return text;
+  },
+
+  // ==========================================================
+  // STUDY PLAN
+  // ==========================================================
+  async generateStudyPlan(history: QuizResult[]): Promise<string> {
+    const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+
+    const summary = history
+      .slice(-5)
+      .map(h => `Topic: ${h.topic} | Score: ${h.score}/${h.totalQuestions}`)
+      .join("\n");
+
+    const prompt = `
+Based on this quiz history:
+
+${summary}
+
+Write a 3-step study plan under 120 words.
+`;
+
+    const result = await model.generateContent(prompt);
+    const text = result.response.text();
+
+    await saveToFirestore("studyPlans", {
+      history, studyPlan: text, timestamp: Date.now()
+    });
+
+    return text;
   }
 };

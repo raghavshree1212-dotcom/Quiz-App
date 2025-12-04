@@ -1,22 +1,34 @@
-import { initializeApp } from "firebase/app";
+import { initializeApp, getApps } from "firebase/app";
 import { getAuth, GoogleAuthProvider } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 
-// Configuration from user provided snippet
+// -----------------------------------------------------
+// Correct Firebase Configuration
+// -----------------------------------------------------
 const firebaseConfig = {
-  apiKey: "AIzaSyDTJk6N5bxHTMOJ4HZ3E2ZV2R--1or2EzA",
-  authDomain: "quizportal-57025.firebaseapp.com",
-  projectId: "quizportal-57025",
-  storageBucket: "quizportal-57025.firebasestorage.app",
-  messagingSenderId: "371363017336",
-  appId: "1:371363017336:web:307aeaca1d83a55f60338d",
-  measurementId: "G-RFRCYL18ED"
+  apiKey: "AIzaSyCDaiL-WJDyedwdbtH6l4KZJm959X_M_pg",
+  authDomain: "myquizapp-1e724.firebaseapp.com",
+  projectId: "myquizapp-1e724",
+  
+  // Corrected storage bucket (MUST NOT use .firebasestorage.app)
+  storageBucket: "myquizapp-1e724.appspot.com",
+
+  messagingSenderId: "844293890344",
+  appId: "1:844293890344:web:aba7188c71d2bd0b80b01d"
 };
 
-// Initialize Firebase
-const app = initializeApp(firebaseConfig);
+// -----------------------------------------------------
+// Initialize Firebase safely (prevents duplicate init)
+// -----------------------------------------------------
+const app = !getApps().length ? initializeApp(firebaseConfig) : getApps()[0];
 
-// Export services
+// -----------------------------------------------------
+// Export Firebase Services
+// -----------------------------------------------------
 export const auth = getAuth(app);
-export const googleProvider = new GoogleAuthProvider();
 export const db = getFirestore(app);
+
+// Google Provider setup
+export const googleProvider = new GoogleAuthProvider();
+googleProvider.addScope("email");
+googleProvider.addScope("profile");
