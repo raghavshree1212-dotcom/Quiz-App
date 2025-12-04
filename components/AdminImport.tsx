@@ -123,22 +123,23 @@ await storageService.addQuestions(userId, finalWithIds);
   // ------------------------------------------------------------------
   // Image Upload (Base64)
   // ------------------------------------------------------------------
-  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (!e.target.files) return;
+ const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  if (!e.target.files) return;
 
-    const files = Array.from(e.target.files).slice(0, 10);
+  const files = Array.from(e.target.files).slice(0, 10);
 
-    Promise.all(
-      files.map(
-        (file) =>
-          new Promise<string>((resolve) => {
-            const reader = new FileReader();
-            reader.onloadend = () => resolve(reader.result as string);
-            // reader.readAsDataURL(file); // FIX: was commented out earlier
-          })
-      )
-    ).then((base64s) => setImages((prev) => [...prev, ...base64s]));
-  };
+  Promise.all(
+    files.map(
+      (file:File) =>
+        new Promise<string>((resolve) => {
+          const reader = new FileReader();
+          reader.onloadend = () => resolve(reader.result as string);
+          reader.readAsDataURL(file); // VERY IMPORTANT
+        })
+    )
+  ).then((base64s) => setImages((prev) => [...prev, ...base64s]));
+};
+;
 
   // ------------------------------------------------------------------
   // File Upload (Text-based)
